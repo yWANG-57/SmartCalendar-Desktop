@@ -46,6 +46,19 @@ Download `SmartCalendar Setup 1.0.0.exe` from [Releases](../../releases) and ins
 3. Click **Analyze** — AI extracts title, time, location, etc.
 4. Edit if needed, then click **Save to Calendar**
 
+## Daily Usage
+
+After installation, launch SmartCalendar from the Start Menu or desktop shortcut. The app runs in the system tray.
+
+**Auto-start on boot (optional):**
+
+1. Press `Win + R`, type `shell:startup`, press Enter
+2. Right-click in the opened folder -> **New -> Shortcut**
+3. Browse to `C:\Users\<YourName>\AppData\Local\Programs\SmartCalendar\SmartCalendar.exe`
+4. Name it `SmartCalendar` -> Finish
+
+The app will now start automatically when you log in.
+
 ## Privacy & Security
 
 - All API keys and tokens are **encrypted locally** using OS-level encryption (Electron safeStorage)
