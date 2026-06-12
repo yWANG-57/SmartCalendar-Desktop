@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>SmartCalendar</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- 标题栏 -->
+    <header class="titlebar">
+      <div class="titlebar-drag">
+        <span class="logo-dot"></span>
+        <span class="titlebar-text">Smart Calendar</span>
+        <span class="titlebar-hint">Ctrl+Alt+S</span>
+      </div>
+      <button id="close-btn" class="close-btn" title="关闭">✕</button>
+    </header>
+
+    <div class="content">
+      <!-- 剪贴板同意横幅 -->
+      <div id="clipboard-banner" class="clipboard-banner hidden">
+        <div class="clipboard-banner-text">
+          SmartCalendar 希望自动读取剪贴板内容以快速填入文本。你的文本将发送到 Google Gemini API 进行解析。
+        </div>
+        <div class="clipboard-banner-actions">
+          <button id="clipboard-accept" class="btn-sm-save clipboard-btn-accept">允许</button>
+          <button id="clipboard-decline" class="btn-sm-save">暂不</button>
+        </div>
+      </div>
+
+      <!-- 错误 / 成功提示 -->
+      <div id="error-banner"   class="alert alert-error   hidden"></div>
+      <div id="success-banner" class="alert alert-success hidden"></div>
+
+      <!-- 设置面板 -->
+      <details id="settings-panel" class="settings-panel">
+        <summary class="settings-summary">
+          <span class="settings-label">设置</span>
+          <span id="settings-status" class="settings-status-text"></span>
+        </summary>
+        <div class="settings-body">
+
+          <!-- Gemini API Key -->
+          <div class="settings-group">
+            <label class="section-label" for="api-key-input">Gemini API Key</label>
+            <div class="input-row">
+              <input id="api-key-input" type="password" class="key-input"
+                     placeholder="AIza..." autocomplete="off" />
+              <button id="save-key-btn" class="btn-sm-save">保存</button>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <!-- Google OAuth2 凭据 -->
+          <div class="settings-group">
+            <label class="section-label" for="client-id-input">Google OAuth2 Client ID</label>
+            <input id="client-id-input" type="text" class="key-input"
+                   placeholder="xxxxx.apps.googleusercontent.com" autocomplete="off" />
+            <label class="section-label mt6" for="client-secret-input">
+              Client Secret
+              <span class="label-note">（Desktop app 类型需要；Web app 类型留空）</span>
+            </label>
+            <div class="input-row">
+              <input id="client-secret-input" type="password" class="key-input"
+                     placeholder="可选" autocomplete="off" />
+              <button id="save-creds-btn" class="btn-sm-save">保存</button>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <!-- Google 授权 -->
+          <div class="settings-group">
+            <div class="auth-row">
+              <div id="auth-status" class="auth-dot auth-dot-idle"></div>
+              <span id="auth-label" class="auth-label">未连接 Google</span>
+              <button id="auth-btn" class="btn btn-auth">连接账户</button>
+            </div>
+            <div id="auth-hint" class="key-hint"></div>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <!-- 隐私与数据 -->
+          <div class="settings-group">
+            <div class="privacy-notice">
+              隐私说明：你的文本仅发送到 Google Gemini API 用于事件解析，本应用不存储任何用户内容。API 密钥和 Token 以加密形式保存在本地。
+            </div>
+            <button id="clear-data-btn" class="btn-sm-save btn-danger-outline">清除所有数据并登出</button>
+          </div>
+
+        </div>
+      </details>
+
+      <!-- 输入区域 -->
+      <section class="section">
+        <label for="input-text" class="section-label">
+          文本内容
+          <span class="label-note">（已自动从剪贴板读取）</span>
+        </label>
+        <textarea id="input-text" class="textarea" rows="4"
+          placeholder="复制任意文字后按 Ctrl+Alt+S，此处会自动填入..."></textarea>
+      </section>
+
+      <!-- 操作按钮 -->
+      <section class="section section-actions">
+        <button id="analyze-btn" class="btn btn-primary">Analyze</button>
+        <button id="save-btn"    class="btn btn-secondary" disabled>Save to Calendar</button>
+      </section>
+
+      <!-- 可编辑预览卡片 -->
+      <section class="section">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">事件预览</div>
+              <div class="card-subtitle">解析后可直接编辑</div>
+            </div>
+            <div id="card-status" class="card-status">未解析</div>
+          </div>
+
+          <div class="card-body">
+            <div class="edit-field">
+              <label class="field-label" for="edit-title">标题</label>
+              <input id="edit-title" type="text" class="edit-input" placeholder="-" />
+            </div>
+
+            <div class="edit-field-row">
+              <div class="edit-field-half">
+                <label class="field-label" for="edit-start">开始时间</label>
+                <input id="edit-start" type="datetime-local" class="edit-input" />
+              </div>
+              <div class="edit-field-half">
+                <label class="field-label" for="edit-end">结束时间</label>
+                <input id="edit-end" type="datetime-local" class="edit-input" />
+              </div>
+            </div>
+
+            <div class="edit-field">
+              <label class="field-label" for="edit-location">地点</label>
+              <input id="edit-location" type="text" class="edit-input" placeholder="-" />
+            </div>
+
+            <div class="edit-field">
+              <label class="field-label" for="edit-reminder">提前提醒（分钟）</label>
+              <input id="edit-reminder" type="number" class="edit-input edit-input-sm"
+                     min="0" max="1440" value="10" />
+            </div>
+
+            <div class="edit-field">
+              <label class="field-label" for="edit-description">描述</label>
+              <textarea id="edit-description" class="edit-textarea" rows="3" placeholder="-"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /content -->
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
