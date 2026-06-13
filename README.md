@@ -66,13 +66,6 @@ The app will now start automatically when you log in.
 - No user data is stored or transmitted by this application
 - All network requests run in the main process; the UI layer has no network access (CSP enforced)
 
-## Tech Stack
-
-- Electron 28
-- Google Gemini API (text analysis)
-- Google Calendar API (event creation)
-- OAuth2 with PKCE + CSRF protection
-
 ## License
 
 MIT
