@@ -21,6 +21,8 @@ const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
 
+const isMac = process.platform === 'darwin';
+
 // ─── Encrypted persistent store ──────────────────────────────────────────────
 
 const SECURE_KEYS = new Set([
@@ -31,10 +33,20 @@ const SECURE_KEYS = new Set([
   'googleRefreshToken',
 ]);
 
+// 钥匙串不可用时给用户看的说明。三大平台的成因不同，但用户要做的事一样：
+// 重启应用，在系统弹出的授权框里选择「始终允许」。
+const SECURE_STORAGE_HINT =
+  process.platform === 'darwin'
+    ? '系统钥匙串访问被拒绝或不可用。请退出并重新打开 SmartCalendar，在弹出的钥匙串提示中选择「始终允许」。'
+    : '系统凭据存储当前不可用，无法安全读写密钥。请重启 SmartCalendar 后重试。';
+
 class Store {
   constructor() {
     this._path = null;
     this._data = {};
+    // 记录哪些密钥「存在但解不开」—— 这和「从未配置过」是完全不同的状态，
+    // 混为一谈会让用户以为配置丢了，从而反复重填一个根本存不进去的值。
+    this._undecryptable = new Set();
   }
 
   init() {
@@ -43,19 +55,36 @@ class Store {
       if (fs.existsSync(this._path)) {
         this._data = JSON.parse(fs.readFileSync(this._path, 'utf8'));
       }
-    } catch {}
+    } catch (e) {
+      console.error('[SmartCalendar] 读取 config.json 失败:', e.message);
+    }
     this._migrateSecureKeys();
+    this.verifySecureKeys();   // 启动即暴露问题，而不是等用户点到某个功能
+  }
+
+  // isEncryptionAvailable() 本身在钥匙串被拒时也可能抛异常，不能裸调
+  _encryptionAvailable() {
+    try {
+      return safeStorage.isEncryptionAvailable();
+    } catch (e) {
+      console.error('[SmartCalendar] safeStorage 不可用:', e.message);
+      return false;
+    }
   }
 
   _migrateSecureKeys() {
-    if (!safeStorage.isEncryptionAvailable()) return;
+    if (!this._encryptionAvailable()) return;
     let changed = false;
     for (const key of SECURE_KEYS) {
       const raw = this._data[key];
       if (typeof raw === 'string' && raw && !raw.startsWith('enc:')) {
-        const encrypted = safeStorage.encryptString(raw);
-        this._data[key] = 'enc:' + encrypted.toString('base64');
-        changed = true;
+        try {
+          const encrypted = safeStorage.encryptString(raw);
+          this._data[key] = 'enc:' + encrypted.toString('base64');
+          changed = true;
+        } catch (e) {
+          console.error(`[SmartCalendar] 迁移 ${key} 到加密存储失败:`, e.message);
+        }
       }
     }
     if (changed) this._save();
@@ -65,8 +94,15 @@ class Store {
     try {
       fs.writeFileSync(this._path, JSON.stringify(this._data, null, 2), 'utf8');
     } catch (e) {
-      console.error('Store write error:', e);
+      console.error('[SmartCalendar] 写入 config.json 失败:', e.message);
     }
+  }
+
+  // 某个键是否「配置过」—— 不做解密，因此钥匙串不可用时依然准确。
+  // 用它回答「要不要提示用户去配置」，而不是用 get() 的返回值。
+  has(key) {
+    const raw = this._data[key];
+    return typeof raw === 'string' ? raw.length > 0 : raw != null;
   }
 
   get(key, defaultVal = undefined) {
@@ -75,8 +111,15 @@ class Store {
     if (SECURE_KEYS.has(key) && typeof raw === 'string' && raw.startsWith('enc:')) {
       try {
         const buf = Buffer.from(raw.slice(4), 'base64');
-        return safeStorage.decryptString(buf);
-      } catch {
+        const value = safeStorage.decryptString(buf);
+        this._undecryptable.delete(key);
+        return value;
+      } catch (e) {
+        // 钥匙串被拒绝、条目被删除、或应用签名变化都会走到这里。
+        // 数据还在磁盘上，只是此刻读不出来 —— 必须记下来，让上层能把
+        // 「读不出来」和「没配过」区分开并给出可操作的提示。
+        this._undecryptable.add(key);
+        console.error(`[SmartCalendar] 解密 ${key} 失败:`, e.message);
         return defaultVal;
       }
     }
@@ -84,9 +127,19 @@ class Store {
   }
 
   set(key, value) {
-    if (SECURE_KEYS.has(key) && safeStorage.isEncryptionAvailable()) {
-      const encrypted = safeStorage.encryptString(String(value));
+    if (SECURE_KEYS.has(key)) {
+      let encrypted;
+      try {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error('encryption unavailable');
+        encrypted = safeStorage.encryptString(String(value));
+      } catch (e) {
+        // 关键：加密不可用时绝不能退化成明文落盘。原实现在这种情况下会把
+        // API Key 和 refresh token 直接明文写进 config.json。
+        console.error(`[SmartCalendar] 加密 ${key} 失败:`, e.message);
+        throw new Error(SECURE_STORAGE_HINT);
+      }
       this._data[key] = 'enc:' + encrypted.toString('base64');
+      this._undecryptable.delete(key);
     } else {
       this._data[key] = value;
     }
@@ -95,12 +148,39 @@ class Store {
 
   delete(key) {
     delete this._data[key];
+    this._undecryptable.delete(key);
     this._save();
   }
 
   clearAll() {
     this._data = {};
+    this._undecryptable.clear();
     this._save();
+  }
+
+  // 主动校验所有已保存的密钥能否解开。
+  // 必须主动做：get() 只在真正取用时才会发现问题，而 has() 根本不解密 ——
+  // 若只等 get() 触发，设置面板会在凭据其实读不出来时显示「已就绪」，
+  // 用户要一直点到 Analyze 才撞上错误。
+  verifySecureKeys() {
+    for (const key of SECURE_KEYS) {
+      const raw = this._data[key];
+      if (typeof raw === 'string' && raw.startsWith('enc:')) {
+        this.get(key);   // get() 内部维护 _undecryptable，成功时会自动清除
+      }
+    }
+  }
+
+  // 供 UI 展示：加密后端是否可用，以及哪些已保存的密钥当前读不出来
+  secureStatus() {
+    this.verifySecureKeys();
+    const undecryptable = [...this._undecryptable];
+    const available = this._encryptionAvailable();
+    return {
+      ok: available && undecryptable.length === 0,
+      undecryptable,
+      message: available && undecryptable.length === 0 ? null : SECURE_STORAGE_HINT,
+    };
   }
 }
 
@@ -174,6 +254,9 @@ function generatePKCE() {
 let mainWindow = null;
 let tray = null;
 let authServer = null;
+let activeHotkey = null;
+let isAuthing = false;
+let isPinned = false;   // 有未保存内容 / 设置面板展开时，禁止失焦自动隐藏
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -207,6 +290,21 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  // macOS: 让窗口在全屏应用之上也能被热键唤出（菜单栏工具的标配行为）
+  if (isMac) {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+
+  // 失焦自动隐藏。OAuth 期间浏览器会抢走焦点，此时必须保持窗口存活，
+  // 否则用户看不到授权成功/失败的反馈。
+  mainWindow.on('blur', () => {
+    if (isAuthing) return;
+    // showWindow() 每次都会让渲染层清空预览字段，所以在有未保存内容时自动隐藏
+    // 会导致用户编辑到一半的事件被清掉。
+    if (isPinned) return;
+    if (mainWindow.webContents.isDevToolsOpened()) return;
+    mainWindow.hide();
+  });
 }
 
 function positionWindow() {
@@ -217,7 +315,7 @@ function positionWindow() {
   const wa = display.workArea;
 
   let x = Math.round(trayBounds.x + trayBounds.width / 2 - winBounds.width / 2);
-  let y = trayBounds.y > wa.height / 2
+  let y = trayBounds.y > wa.y + wa.height / 2
     ? trayBounds.y - winBounds.height - 4
     : trayBounds.y + trayBounds.height + 4;
 
@@ -242,36 +340,117 @@ function showWindow() {
   }
 }
 
-// ─── App lifecycle ────────────────────────────────────────────────────────────
+// ─── Global hotkey ───────────────────────────────────────────────────────────
+//
+// 全局热键是抢占式的：注册成功后，该组合在所有应用中都会被本应用拦截。
+// 因此这里遵循三条原则：
+//   1) 默认值只负责「装上就能用」，用户必须能改；
+//   2) 注册结果必须能反馈到 UI，否则用户只会看到「按了没反应」；
+//   3) 托盘点击始终是兜底入口 —— 热键全部失败时不能让应用没有入口。
+//
+// 选值避坑记录：
+//   - Ctrl+Alt+<字母> 在欧洲键盘布局上等价于 AltGr+<字母>，会抢掉 @ € ł ś 等字符输入
+//   - macOS 的 Ctrl+Space / Ctrl+Alt+Space 是输入法切换，抢了会导致中英文切换失效
+//   - Cmd+<单字母> 会让全系统所有应用的同名功能失灵（如 Cmd+Shift+S 的「另存为」）
+//   - Fn / 地球仪键无法作为 Electron accelerator 的修饰键，不要考虑
 
-app.whenReady().then(() => {
-  store.init();
-  createWindow();
+// CommandOrControl 会自动展开为 macOS 的 ⌘⌥S 和 Windows 的 Ctrl+Alt+S
+const DEFAULT_HOTKEY = 'CommandOrControl+Alt+S';
 
+const FALLBACK_HOTKEYS = isMac
+  ? ['Command+Alt+K', 'Control+Alt+S']
+  : ['Alt+Shift+S', 'Ctrl+Alt+K'];
+
+function broadcastHotkey(requested) {
+  mainWindow?.webContents.send('hotkey:changed', {
+    active: activeHotkey,
+    saved: requested ?? null,
+  });
+}
+
+function applyHotkey(preferred) {
+  globalShortcut.unregisterAll();
+
+  for (const accelerator of [preferred, ...FALLBACK_HOTKEYS].filter(Boolean)) {
+    try {
+      // register() 对非法的 accelerator 字符串会直接抛异常 —— 开放用户
+      // 自定义后不 catch 会崩掉主进程。
+      //
+      // 关于返回值：Windows 上 RegisterHotKey 是独占的，被占用会返回 false，
+      // 下面的降级链能正常生效。但 macOS 上实测（两个 Electron 应用注册同一
+      // 组合）register() 依然返回 true —— 系统不让应用互相抢夺全局热键，冲突
+      // 是「静默失败」而非报错。所以在 macOS 上不能指望自动降级，真正的兜底
+      // 是「用户可自行更换热键」+「托盘点击始终可用」。
+      if (globalShortcut.register(accelerator, showWindow)) {
+        activeHotkey = accelerator;
+        tray?.setToolTip(`SmartCalendar — ${accelerator}`);
+        console.log(`[SmartCalendar] 热键已注册: ${accelerator}`);
+        broadcastHotkey(preferred);
+        return accelerator;
+      }
+      console.warn(`[SmartCalendar] 热键被占用: ${accelerator}`);
+    } catch (e) {
+      console.warn(`[SmartCalendar] 无效的热键 "${accelerator}": ${e.message}`);
+    }
+  }
+
+  activeHotkey = null;
+  tray?.setToolTip('SmartCalendar — 热键未启用，请点击图标');
+  console.warn('[SmartCalendar] 所有候选热键均注册失败');
+  broadcastHotkey(preferred);
+  return null;
+}
+
+// ─── Tray ────────────────────────────────────────────────────────────────────
+
+function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'icon.png');
-  const icon = fs.existsSync(iconPath)
+  let icon = fs.existsSync(iconPath)
     ? nativeImage.createFromPath(iconPath)
     : nativeImage.createEmpty();
 
-  tray = new Tray(icon);
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: '打开 SmartCalendar', click: showWindow },
-      { type: 'separator' },
-      { label: '退出', click: () => app.quit() },
-    ])
-  );
-  tray.on('click', showWindow);
-
-  const shortcuts = ['Ctrl+Alt+S', 'Ctrl+Shift+Space', 'Alt+Shift+S'];
-  const registered = shortcuts.find((s) => globalShortcut.register(s, showWindow));
-  if (!registered) {
-    console.warn('[SmartCalendar] Failed to register any global shortcut');
-    tray.setToolTip('SmartCalendar');
-  } else {
-    console.log(`[SmartCalendar] Global shortcut registered: ${registered}`);
-    tray.setToolTip(`SmartCalendar — ${registered}`);
+  // macOS 菜单栏不会自动缩放托盘图标，256×256 的原图会把菜单栏撑破
+  if (isMac && !icon.isEmpty()) {
+    icon = icon.resize({ width: 16, height: 16 });
+    // setTemplateImage 需要「纯黑 + alpha」的图形才能随浅色/深色菜单栏正确反色，
+    // 当前 icon.png 是彩色图，开了会变成一团黑。备好 assets/iconTemplate.png
+    // （16×16 与 @2x 的 32×32）之后再启用下面这行：
+    // icon.setTemplateImage(true);
   }
+
+  tray = new Tray(icon);
+  tray.setToolTip('SmartCalendar');
+
+  const menu = Menu.buildFromTemplate([
+    { label: '打开 SmartCalendar', click: showWindow },
+    { type: 'separator' },
+    { label: '退出', click: () => app.quit() },
+  ]);
+
+  if (isMac) {
+    // macOS 上一旦调用 setContextMenu()，左键点击就只会弹出菜单，'click' 事件
+    // 不再触发，托盘会失去「点一下打开窗口」的能力 —— 而它正是热键失效时的
+    // 唯一入口。所以这里改成左键开窗、右键弹菜单。
+    tray.on('click', showWindow);
+    tray.on('right-click', () => tray.popUpContextMenu(menu));
+  } else {
+    tray.setContextMenu(menu);
+    tray.on('click', showWindow);
+  }
+}
+
+// ─── App lifecycle ────────────────────────────────────────────────────────────
+
+app.whenReady().then(() => {
+  // macOS: 菜单栏常驻工具不应占用 Dock（Windows 侧由 skipTaskbar 负责）。
+  // 打包时还需配合 Info.plist 的 LSUIElement，否则启动瞬间 Dock 会闪一下。
+  if (isMac) app.dock?.hide();
+
+  store.init();
+  createWindow();
+  createTray();
+
+  applyHotkey(store.get('hotkey', DEFAULT_HOTKEY));
 });
 
 app.on('will-quit', () => {
@@ -279,19 +458,31 @@ app.on('will-quit', () => {
   if (authServer) { authServer.close(); authServer = null; }
 });
 
-app.on('window-all-closed', (e) => e.preventDefault());
+app.on('window-all-closed', () => {
+  // 托盘常驻应用：窗口关闭不退出。窗口实际只会 hide()，这里是兜底。
+  // 注意 window-all-closed 回调不接收 event 参数，原来的 e.preventDefault() 会抛异常。
+});
 
 // ─── IPC: Window ─────────────────────────────────────────────────────────────
 
 ipcMain.on('window:hide', () => mainWindow?.hide());
 
+ipcMain.on('window:setPinned', (_, value) => { isPinned = !!value; });
+
 // ─── IPC: Settings (narrow, no generic store access) ─────────────────────────
 
-ipcMain.handle('settings:getStatus', () => ({
-  hasGeminiKey: !!store.get('geminiApiKey'),
-  hasGoogleAuth: !!store.get('googleRefreshToken'),
-  hasClipboardConsent: !!store.get('clipboardConsent'),
-}));
+ipcMain.handle('settings:getStatus', () => {
+  const secure = store.secureStatus();
+  return {
+    // 用 has() 而非 get()：钥匙串读不出来时，配置依然是「配置过」的，
+    // 报成未配置会诱导用户去重填一个当下根本存不进去的值。
+    hasGeminiKey: store.has('geminiApiKey'),
+    hasGoogleAuth: store.has('googleRefreshToken'),
+    hasClipboardConsent: !!store.get('clipboardConsent'),
+    secureStorageOk: secure.ok,
+    secureStorageError: secure.message,
+  };
+});
 
 ipcMain.handle('settings:saveGeminiKey', (_, key) => {
   store.set('geminiApiKey', key);
@@ -307,15 +498,36 @@ ipcMain.handle('settings:setClipboardConsent', (_, value) => {
   store.set('clipboardConsent', !!value);
 });
 
+ipcMain.handle('settings:getHotkey', () => ({
+  active: activeHotkey,
+  saved: store.get('hotkey', DEFAULT_HOTKEY),
+  fallback: DEFAULT_HOTKEY,
+}));
+
+ipcMain.handle('settings:setHotkey', (_, accelerator) => {
+  // 空值表示「恢复默认」
+  const value = String(accelerator || '').trim() || DEFAULT_HOTKEY;
+  store.set('hotkey', value);
+  applyHotkey(value);
+  return { active: activeHotkey, saved: value, fallback: DEFAULT_HOTKEY };
+});
+
 ipcMain.handle('settings:clearAll', () => {
   store.clearAll();
+  applyHotkey(DEFAULT_HOTKEY);
 });
 
 // ─── IPC: Gemini API (main process only) ─────────────────────────────────────
 
 ipcMain.handle('api:analyze', async (_, { text, timezone }) => {
   const apiKey = store.get('geminiApiKey');
-  if (!apiKey) throw new Error('请先在设置中配置 Gemini API Key。');
+  if (!apiKey) {
+    throw new Error(
+      store.has('geminiApiKey')
+        ? `无法读取已保存的 Gemini API Key。${SECURE_STORAGE_HINT}`
+        : '请先在设置中配置 Gemini API Key。'
+    );
+  }
 
   const now = new Date();
   const systemPrompt = `Extract event details strictly as JSON:
@@ -370,7 +582,12 @@ async function getValidToken() {
   const refreshToken = store.get('googleRefreshToken');
   const clientId = store.get('googleClientId');
   if (!refreshToken || !clientId) {
-    throw new Error('未授权，请先在设置中点击"连接 Google 账户"。');
+    const saved = store.has('googleRefreshToken') && store.has('googleClientId');
+    throw new Error(
+      saved
+        ? `无法读取已保存的 Google 凭据。${SECURE_STORAGE_HINT}`
+        : '未授权，请先在设置中点击"连接 Google 账户"。'
+    );
   }
 
   const clientSecret = store.get('googleClientSecret', '');
@@ -440,10 +657,17 @@ ipcMain.handle('auth:google', () => {
     if (authServer) { authServer.close(); authServer = null; }
 
     let settled = false;
+    isAuthing = true;   // 授权期间浏览器会抢走焦点，暂停失焦自动隐藏
     const settle = (fn, val) => {
       if (settled) return;
       settled = true;
+      isAuthing = false;
       if (authServer) { authServer.close(); authServer = null; }
+      // 授权结果（无论成功失败）需要用户看见，把窗口重新带回前台
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
       fn(val);
     };
 

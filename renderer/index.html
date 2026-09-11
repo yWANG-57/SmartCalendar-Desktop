@@ -13,7 +13,7 @@
       <div class="titlebar-drag">
         <span class="logo-dot"></span>
         <span class="titlebar-text">Smart Calendar</span>
-        <span class="titlebar-hint">Ctrl+Alt+S</span>
+        <span id="titlebar-hotkey" class="titlebar-hint">…</span>
       </div>
       <button id="close-btn" class="close-btn" title="关闭">✕</button>
     </header>
@@ -84,6 +84,22 @@
 
           <div class="settings-divider"></div>
 
+          <!-- 全局热键 -->
+          <div class="settings-group">
+            <label class="section-label" for="hotkey-input">
+              全局热键
+              <span class="label-note">（点击输入框后直接按下想用的组合键）</span>
+            </label>
+            <div class="input-row">
+              <input id="hotkey-input" type="text" class="key-input hotkey-input"
+                     placeholder="点击后按下组合键..." readonly autocomplete="off" />
+              <button id="hotkey-reset-btn" class="btn-sm-save">恢复默认</button>
+            </div>
+            <div id="hotkey-hint" class="key-hint"></div>
+          </div>
+
+          <div class="settings-divider"></div>
+
           <!-- 隐私与数据 -->
           <div class="settings-group">
             <div class="privacy-notice">
@@ -102,7 +118,7 @@
           <span class="label-note">（已自动从剪贴板读取）</span>
         </label>
         <textarea id="input-text" class="textarea" rows="4"
-          placeholder="复制任意文字后按 Ctrl+Alt+S，此处会自动填入..."></textarea>
+          placeholder="复制任意文字后唤出本窗口，此处会自动填入..."></textarea>
       </section>
 
       <!-- 操作按钮 -->
