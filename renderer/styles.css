@@ -443,3 +443,17 @@ input, textarea { user-select: text; }
   border-color: var(--danger) !important;
   background: var(--danger-soft) !important;
 }
+
+/* ─── Hotkey recorder ────────────────────────────────────────────────────────── */
+
+.hotkey-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.1em;
+  text-align: center;
+  cursor: pointer;
+  caret-color: transparent;
+}
+.hotkey-input:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
+}
