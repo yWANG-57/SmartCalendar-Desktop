@@ -148,6 +148,10 @@ clears the quarantine attribute (see Installation).
 > rebuild prompts again — choose "Always Allow". Denying it makes `safeStorage` fail, and because
 > `Store.get()` swallows decryption errors the app will simply claim the API key is not configured.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the release history.
+
 ## License
 
 MIT
