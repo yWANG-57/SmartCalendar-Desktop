@@ -258,6 +258,11 @@ let activeHotkey = null;
 let isAuthing = false;
 let isPinned = false;   // 有未保存内容 / 设置面板展开时，禁止失焦自动隐藏
 
+// 上一次成功保存时剪贴板里的内容。showWindow() 每次唤出都会重新读剪贴板回填
+// 输入框，而「保存到日历」并不会改变剪贴板 —— 不记住这个的话，下次唤出又会把
+// 同一段已经入库的文字填回来。仅存在内存中，不落盘（剪贴板内容属于用户数据）。
+let consumedClipboard = null;
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 420,
@@ -333,7 +338,10 @@ function showWindow() {
   const hasConsent = !!store.get('clipboardConsent');
   if (hasConsent) {
     const clipText = clipboard.readText().trim();
-    mainWindow.webContents.send('show-with-text', clipText);
+    // 剪贴板里还是上次已存进日历的那段文字 -> 留一个空白输入框，
+    // 而不是把同一个事件再回填一次
+    const alreadySaved = clipText !== '' && clipText === consumedClipboard;
+    mainWindow.webContents.send('show-with-text', alreadySaved ? '' : clipText);
   } else {
     mainWindow.webContents.send('show-with-text', '');
     mainWindow.webContents.send('clipboard-consent-needed');
@@ -469,6 +477,12 @@ ipcMain.on('window:hide', () => mainWindow?.hide());
 
 ipcMain.on('window:setPinned', (_, value) => { isPinned = !!value; });
 
+// 渲染层保存成功后调用。这里直接读剪贴板而不是让渲染层把文本传过来，
+// 避免整段文本在 IPC 上来回搬运。
+ipcMain.on('clipboard:markConsumed', () => {
+  consumedClipboard = clipboard.readText().trim() || null;
+});
+
 // ─── IPC: Settings (narrow, no generic store access) ─────────────────────────
 
 ipcMain.handle('settings:getStatus', () => {
@@ -496,6 +510,31 @@ ipcMain.handle('settings:saveGoogleCreds', (_, { clientId, clientSecret }) => {
 
 ipcMain.handle('settings:setClipboardConsent', (_, value) => {
   store.set('clipboardConsent', !!value);
+});
+
+ipcMain.handle('settings:getLoginItem', () => {
+  try {
+    return !!app.getLoginItemSettings().openAtLogin;
+  } catch (e) {
+    console.error('[SmartCalendar] 读取开机自启动设置失败:', e.message);
+    return false;
+  }
+});
+
+ipcMain.handle('settings:setLoginItem', (_, value) => {
+  // 开发模式下注册的是 Electron 自身的可执行文件，会让每次登录都跑起一个
+  // 空白的 Electron —— 而且卸载本应用也清不掉它。直接拒绝。
+  if (!app.isPackaged) {
+    throw new Error('开发模式下不支持设置开机自启动，请在打包后的应用里操作。');
+  }
+  try {
+    // openAsHidden: 菜单栏应用本来就没有启动窗口，别在登录时抢焦点
+    app.setLoginItemSettings({ openAtLogin: !!value, openAsHidden: true });
+    return !!app.getLoginItemSettings().openAtLogin;
+  } catch (e) {
+    console.error('[SmartCalendar] 设置开机自启动失败:', e.message);
+    throw new Error('无法修改开机自启动设置，请到系统设置的「登录项」中手动添加。');
+  }
 });
 
 ipcMain.handle('settings:getHotkey', () => ({

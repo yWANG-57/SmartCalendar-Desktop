@@ -30,6 +30,9 @@ const clipboardDeclineBtn   = document.getElementById('clipboard-decline');
 
 const clearDataBtn = document.getElementById('clear-data-btn');
 
+const loginItemToggle = document.getElementById('login-item-toggle');
+const loginItemHint   = document.getElementById('login-item-hint');
+
 const titlebarHotkey = document.getElementById('titlebar-hotkey');
 const hotkeyInput    = document.getElementById('hotkey-input');
 const hotkeyResetBtn = document.getElementById('hotkey-reset-btn');
@@ -143,9 +146,51 @@ function riskyAccelerator(acc) {
   return '';
 }
 
+// 一条事件的信息常常分散在好几个地方，需要复制多次才凑齐。所以唤出窗口时
+// 不能无条件覆盖输入框 —— 已经有内容时，把新复制的这段接在后面。
+function fillFromClipboard(clipText) {
+  const existing = textarea.value.trim();
+  const incoming = (clipText || '').trim();
+
+  if (!existing) { resetForm(incoming); return; }
+
+  showError('');
+  showSuccess('');
+
+  if (incoming && !existing.includes(incoming)) {
+    textarea.value = existing + '\n' + incoming;
+    // 输入变了，之前那次解析的结果已经对不上，必须重新 Analyze 才能保存
+    if (!saveBtn.disabled) {
+      saveBtn.disabled = true;
+      cardStatus.textContent = '文本已更新，请重新 Analyze';
+      cardStatus.style.color = '';
+    }
+  }
+  updatePinned();
+}
+
+// 把窗口恢复成「刚打开、什么都没解析」的状态
+function resetForm(text) {
+  textarea.value = text || '';
+  showError('');
+  showSuccess('');
+  cardStatus.textContent = '未解析';
+  cardStatus.style.color = '';
+  saveBtn.disabled = true;
+  editTitle.value = '';
+  editStart.value = '';
+  editEnd.value = '';
+  editLocation.value = '';
+  editReminder.value = '10';
+  editDescription.value = '';
+  updatePinned();
+}
+
 // 有已解析未保存的内容、或设置面板展开时，阻止主进程的失焦自动隐藏
 function updatePinned() {
-  const hasDraft = !saveBtn.disabled;
+  // 输入框里只要还有没处理完的文字，就不允许失焦自动隐藏 ——
+  // 否则用户切去别的窗口复制第二段内容时，这边就把草稿藏没了。
+  const hasDraft = !saveBtn.disabled || textarea.value.trim() !== '';
   api.window.setPinned(hasDraft || settingsPanel.hasAttribute('open'));
 }
 
@@ -301,6 +346,32 @@ async function connectGoogle() {
   }
 }
 
+// ─── Launch at login ───────────────────────────────────────────────────────────
+
+function renderLoginItem(enabled, message, kind) {
+  loginItemToggle.checked = enabled;
+  loginItemHint.textContent = message || (enabled ? '登录后会自动在菜单栏启动' : '');
+  loginItemHint.className = 'key-hint' + (kind ? ` key-hint-${kind}` : '');
+}
+
+async function loadLoginItem() {
+  try {
+    renderLoginItem(await api.settings.getLoginItem());
+  } catch {
+    renderLoginItem(false);
+  }
+}
+
+async function toggleLoginItem() {
+  const wanted = loginItemToggle.checked;
+  try {
+    // 以系统返回的实际状态为准，而不是以复选框为准
+    renderLoginItem(await api.settings.setLoginItem(wanted), null, 'ok');
+  } catch (err) {
+    renderLoginItem(!wanted, cleanErr(err, '设置开机自启动失败'), 'warn');
+  }
+}
+
 // ─── Clipboard consent ────────────────────────────────────────────────────────
 
 function showClipboardBanner() {
@@ -426,10 +497,16 @@ async function saveToCalendar() {
     cardStatus.textContent = '已保存';
     cardStatus.style.color = '#22c55e';
     updatePinned();   // saveBtn 已禁用 -> 解除 pin，窗口可以正常失焦隐藏
+    // 这段剪贴板内容已经入库，下次唤出不要再把它回填进输入框
+    api.markClipboardConsumed();
     showSuccess('已成功保存到 Google Calendar！');
     api.notify('SmartCalendar', `"${summary}" 已添加到 Google Calendar`);
 
-    setTimeout(() => api.window.hide(), 2500);
+    // 先隐藏再清空，让「已保存」的提示完整显示 2.5 秒而不是提前闪掉
+    setTimeout(() => {
+      api.window.hide();
+      resetForm('');
+    }, 2500);
   } catch (err) {
     console.error(err);
     showError(cleanErr(err, '保存时发生错误'));
@@ -446,24 +523,11 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSettings();
 
   // 初次读取 + 后续主进程主动推送（降级/失败时会推）
+  loadLoginItem();
   api.settings.getHotkey().then((info) => renderHotkey(info, ''));
   api.onHotkeyChanged((info) => renderHotkey(info, ''));
 
-  api.onShow((text) => {
-    textarea.value = text || '';
-    showError('');
-    showSuccess('');
-    cardStatus.textContent = '未解析';
-    cardStatus.style.color = '';
-    saveBtn.disabled = true;
-    editTitle.value = '';
-    editStart.value = '';
-    editEnd.value = '';
-    editLocation.value = '';
-    editReminder.value = '10';
-    editDescription.value = '';
-    updatePinned();
-  });
+  api.onShow((text) => fillFromClipboard(text));
 
   api.onClipboardConsentNeeded(() => {
     showClipboardBanner();
@@ -479,6 +543,8 @@ document.addEventListener('DOMContentLoaded', () => {
   clipboardAcceptBtn.addEventListener('click',  acceptClipboard);
   clipboardDeclineBtn.addEventListener('click', declineClipboard);
 
+  loginItemToggle.addEventListener('change', toggleLoginItem);
+  textarea.addEventListener('input', updatePinned);
   settingsPanel.addEventListener('toggle', updatePinned);
   updatePinned();
 

@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-11
+
+### Added
+
+- **Launch at login**, toggled in Settings. Registers the app as a hidden login item so
+  it comes back in the menu bar after a restart. Refused in development mode, where it
+  would register the Electron binary itself rather than the app.
+
+### Changed
+
+- **Opening the window now appends the clipboard instead of replacing the text box.**
+  The details of one event are often spread across several places and have to be copied
+  a few times; each reopen used to discard whatever had been collected so far. New
+  clipboard content is appended on its own line, identical content is not appended
+  twice, and an empty clipboard leaves the box untouched. Appending after a parse marks
+  the preview stale and disables Save until Analyze is run again.
+- The window no longer auto-hides while the text box has content, so switching away to
+  copy the next fragment does not make the draft disappear. Closing it explicitly still
+  works.
+
+## [1.1.1] - 2026-09-11
+
+### Fixed
+
+- After saving an event, reopening the window re-filled the text box with the same
+  text that had just been saved. `showWindow()` reads the clipboard on every
+  invocation, and saving to Calendar does not change the clipboard, so the already
+  captured text kept coming back. The clipboard content consumed by a successful save
+  is now remembered (in memory only — clipboard content is never written to disk) and
+  skipped on the next open, leaving an empty box. Copying anything new fills the box
+  as before.
+- The event preview fields are cleared after a save completes instead of lingering
+  until the next time the window is opened.
+
 ## [1.1.0] - 2026-09-11
 
 macOS support. This release ships macOS installers only — the changes below apply to
@@ -78,5 +112,7 @@ Initial release. Windows only.
 - Renderer isolated from the network by CSP; all API calls run in the main process.
 - Windows NSIS installer.
 
+[1.2.0]: https://github.com/yWANG-57/SmartCalendar-Desktop/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/yWANG-57/SmartCalendar-Desktop/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/yWANG-57/SmartCalendar-Desktop/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/yWANG-57/SmartCalendar-Desktop/releases/tag/v1.0.0

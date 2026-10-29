@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     saveGeminiKey:        (key)           => ipcRenderer.invoke('settings:saveGeminiKey', key),
     saveGoogleCreds:      (id, secret)    => ipcRenderer.invoke('settings:saveGoogleCreds', { clientId: id, clientSecret: secret }),
     setClipboardConsent:  (value)         => ipcRenderer.invoke('settings:setClipboardConsent', value),
+    getLoginItem:         ()              => ipcRenderer.invoke('settings:getLoginItem'),
+    setLoginItem:         (value)         => ipcRenderer.invoke('settings:setLoginItem', value),
     getHotkey:            ()              => ipcRenderer.invoke('settings:getHotkey'),
     setHotkey:            (accelerator)   => ipcRenderer.invoke('settings:setHotkey', accelerator),
     clearAll:             ()              => ipcRenderer.invoke('settings:clearAll'),
@@ -46,6 +48,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 只读的平台标识，用于把 accelerator 渲染成 ⌘⌥S 或 Ctrl+Alt+S
   platform: process.platform,
+
+  // 告知主进程：当前剪贴板内容已经存进日历，下次唤出不要再回填
+  markClipboardConsumed: () => ipcRenderer.send('clipboard:markConsumed'),
 
   // System notification
   notify: (title, body) => ipcRenderer.send('notify', { title, body }),
